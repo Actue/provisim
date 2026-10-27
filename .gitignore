@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+# card dumps read from your own SIMs — never commit
+card_profile.json
+*.json.bak

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "provisim"
+version = "0.1.0"
+description = "Provision SIM/USIM cards from Python: PC/SC reader access, EF read/write, host-side Milenage, and reverse-engineered private protocols for blank programmable cards (GRSIMWrite / LY14 family)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["sim", "usim", "isim", "smartcard", "pcsc", "provisioning", "milenage"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Telecommunications Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: System :: Hardware",
+]
+dependencies = ["pyscard>=2.0"]
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+provisim = "provisim.cli:main"
+
+[tool.setuptools]
+packages = ["provisim"]
