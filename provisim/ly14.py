@@ -116,6 +116,8 @@ class Ly14Card(UiccCard):
                 self._try_send(c00, name + " cla00")
         result["df_7ff0"] = (self._try_send("A0A40804043F007FF0", "7FF0 A0") or
                              self._try_send("00A40804043F007FF0", "7FF0 00"))
+        # XLB family: private key EFs directly under MF
+        result["mf_0001"] = self._try_send("00A40004020001", "MF/0001")
         # case-4 VERIFY detection: Lc=08 data + Le=08 is the accepted form
         # on the T=1 family; plain case-3 gets 6700/6C there.
         result["verify_case4"] = False
@@ -173,6 +175,71 @@ class Ly14Card(UiccCard):
         """A0 96 00 01/02 — algorithm State I / State II."""
         return exchange(self.transport, 0xA0, 0x96, 0x00, which, b"", 0x00,
                         context=f"State {which}", log=self.transport.log)
+
+    # ---------------------------------------------------------- XLB (MF EFs)
+
+    # The "XLB TEST CARD" family stores everything in PRIVATE EFs directly
+    # under MF (verified live 2026-10-28):
+    #   EF 0001 (16B)  Ki
+    #   EF 6002 (17B)  0x01 || OPc          (0x01 = OPc-mode flag)
+    #   EF 2FE5 (5B)   08 1C 2A 00 01       -> switches AKA to Milenage
+    #   EF 2FE6 (17B x 5 rec) resync counters; rec1[0]=0x40 sets the SQN
+    #                 floor — the card only accepts SQN > 0x40
+    # ADM: VERIFY ref 0x0B, key '88888888', CASE-4 (data + Le=08).
+    MILENAGE_PARAMS = bytes.fromhex("081C2A0001")
+    XLB_SQN_FLOOR = 0x40
+
+    def set_ki(self, ki_hex: str) -> None:
+        p = self.probe()
+        if p.get("df_7ff0"):
+            self._write_7ff0_secret(ki_hex, 0x0001, "Ki")
+        elif p.get("mf_0001"):
+            self._send_hex("00A40004020001", "select MF/0001")
+            self._send_hex("00D6000010" + ki_hex, "write Ki")
+        elif p.get("gen4_fb_read_ki"):
+            self.fb_write("LTE_KI", ki_hex)
+        else:
+            self._send_hex("00D51C0010" + ki_hex, "00D5 write Ki")
+
+    def set_opc(self, opc_hex: str) -> None:
+        p = self.probe()
+        if p.get("df_7ff0"):
+            self._write_7ff0_secret(opc_hex, 0x0011, "OPc")
+        elif p.get("mf_0001"):
+            self._send_hex("00A40004026002", "select MF/6002")
+            self._send_hex("00D600001101" + opc_hex, "write 01||OPc")
+        elif p.get("gen4_fb_read_ki"):
+            self.fb_write("LTE_OPC", opc_hex)
+        else:
+            self._send_hex("00D5015710" + opc_hex, "00D5 write OPc")
+
+    def set_milenage(self) -> None:
+        """Switch the card's AKA to standard Milenage (EF 2FE5)."""
+        self._send_hex("00A40004042FE5", "select MF/2FE5")
+        self._send_hex("00D6000005" + self.MILENAGE_PARAMS.hex().upper(),
+                       "write Milenage params")
+
+    def aka(self, rand: bytes, sqn: bytes, amf: bytes,
+            k: bytes, opc: bytes) -> dict:
+        """Run AUTHENTICATE (00 88 00 81) and compare against host Milenage.
+
+        Use SQN > XLB_SQN_FLOOR (0x40) — the card rejects lower values with
+        an AUTS. Returns {'match': bool, 'resp': bytes}.
+        """
+        from .algorithms import milenage_f2345, milenage_f1
+        out = milenage_f2345(k, opc, rand)
+        mac_a = milenage_f1(k, opc, rand, sqn, amf)
+        autn = bytes(a ^ b for a, b in zip(sqn, out["AK"])) + amf + mac_a
+        try:
+            resp = exchange(self.transport, 0x00, 0x88, 0x00, 0x81,
+                            b"\x10" + rand + b"\x10" + autn, 0x40,
+                            context="aka", log=self.transport.log)
+        except CardError as e:
+            return {"match": False, "resp": b"", "error": str(e)}
+        r = resp.hex().upper()
+        return {"match": all(v.hex().upper() in r
+                             for v in (out["RES"], out["CK"], out["IK"])),
+                "resp": resp, "expected": out}
 
     # ---------------------------------------------------------- gen4 (A0FB)
 
