@@ -66,13 +66,16 @@ class TestGen4(unittest.TestCase):
 
 class TestDispatch(unittest.TestCase):
     def test_7ff0_path(self):
-        # all probes succeed (9000) -> 7FF0 branch wins
+        # all probes succeed (9000) -> 7FF0 branch wins; Ki is mirrored
+        # into EFs 0006/000F/0012 like the vendor GUI does
         card, t = make_card()
         card.set_ki(KI)
-        # A092, A096x2 probes then A0A4 7FF0 select -> df_7ff0 True
-        self.assertEqual(t.sent[-1], bytes.fromhex("A0D6000110" + KI))
         self.assertIn(bytes.fromhex("A0A40804043F007FF0"), t.sent)
-        self.assertIn(bytes.fromhex("A0A40004020006"), t.sent)
+        for ef in ("0006", "000F", "0012"):
+            self.assertIn(bytes.fromhex(f"A0A4000402{ef}"), t.sent)
+            self.assertIn(bytes.fromhex("A0D6000110" + KI), t.sent)
+        # last command writes the final mirror EF
+        self.assertEqual(t.sent[-1], bytes.fromhex("A0D6000110" + KI))
 
     def test_gen3_fallback(self):
         # make every probe fail by answering 6D00, except nothing succeeds

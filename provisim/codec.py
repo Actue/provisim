@@ -23,10 +23,12 @@ def swap_nibbles(data: bytes) -> bytes:
     return bytes(out)
 
 
-def decode_bcd(data: bytes, strip_pad: bool = True) -> str:
-    """Swapped-nibble BCD digits: b'\\x64\\xf0' -> '4604'? -> '4640'... see note.
+def decode_bcd(data: bytes, strip_pad: bool = True,
+               strict: bool = True) -> str:
+    """Swapped-nibble BCD digits: each byte holds two digits, low first.
 
-    Each byte holds two digits, low nibble first: 0x64 -> '4','6'.
+    strict=True raises on nibbles A-F (illegal BCD). strict=False keeps
+    them as hex letters — blank cards ship ICCIDs with placeholder nibbles.
     """
     digits = []
     for b in data:
@@ -35,9 +37,9 @@ def decode_bcd(data: bytes, strip_pad: bool = True) -> str:
     if strip_pad:
         while digits and digits[-1] == PAD_NIBBLE:
             digits.pop()
-    if any(d > 9 for d in digits):
+    if strict and any(d > 9 for d in digits):
         raise ValueError(f"invalid BCD nibble in {data.hex()}")
-    return "".join(str(d) for d in digits)
+    return "".join(str(d) if d <= 9 else "ABCDEF"[d - 10] for d in digits)
 
 
 def encode_bcd(digits: str, length: int) -> bytes:
@@ -63,7 +65,8 @@ def b2h(data: bytes) -> str:
 # ---------------------------------------------------------------- ICCID
 
 def decode_iccid(data: bytes) -> str:
-    return decode_bcd(data[:10])
+    # non-strict: blank-card ICCIDs contain placeholder nibbles (A-F)
+    return decode_bcd(data[:10], strict=False)
 
 
 def encode_iccid(iccid: str, length: int = 10) -> bytes:

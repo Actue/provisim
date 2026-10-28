@@ -181,14 +181,28 @@ class Ly14Card(UiccCard):
         return self._fb_send(FB_SLOT[secret],
                              codec.h2b(FB_MAGIC[secret]) + self._key8(value, secret))
 
+    # 7FF0 generation stores Ki/OPc redundantly in EFs 0006/000F/0012
+    KI_EFS = ("0006", "000F", "0012")
+
+    def _write_7ff0_secret(self, payload_hex: str, offset: int,
+                           what: str) -> None:
+        self._send_hex("A0A40804043F007FF0", "select 3F00/7FF0")
+        for ef in self.KI_EFS:
+            try:
+                self._send_hex(f"A0A4000402{ef}", f"select EF {ef}")
+                self._send_hex(f"A0D6{offset:04X}10{payload_hex}",
+                               f"write {what} @ {ef} off {offset:#06x}")
+            except CardError as e:
+                # not all cards carry all three mirror EFs; skip missing ones
+                print(f"    [skip] EF {ef}: {e}")
+
     def set_ki(self, ki_hex: str) -> None:
         """Write LTE/USIM Ki. Dispatches on card generation detected via
-        probe(): 7FF0 DF present -> A0D6 path, else gen4 A0FB / gen3 00D5."""
+        probe(): 7FF0 DF present -> A0D6 path (mirrored in 0006/000F/0012),
+        else gen4 A0FB / gen3 00D5."""
         p = self.probe()
         if p.get("df_7ff0"):
-            self._send_hex("A0A40804043F007FF0", "select 3F00/7FF0")
-            self._send_hex("A0A40004020006", "select EF 0006")
-            self._send_hex("A0D6000110" + ki_hex, "write Ki @0006 off 1")
+            self._write_7ff0_secret(ki_hex, 0x0001, "Ki")
         elif p.get("gen4_fb_read_ki"):
             self.fb_write("LTE_KI", ki_hex)
         else:
@@ -198,13 +212,11 @@ class Ly14Card(UiccCard):
     def set_opc(self, opc_hex: str) -> None:
         p = self.probe()
         if p.get("df_7ff0"):
-            self._send_hex("A0A40804043F007FF0", "select 3F00/7FF0")
-            self._send_hex("A0A40004020006", "select EF 0006")
-            self._send_hex("A0D6001110" + opc_hex, "write OPC @0006 off 0x11")
+            self._write_7ff0_secret(opc_hex, 0x0011, "OPc")
         elif p.get("gen4_fb_read_ki"):
             self.fb_write("LTE_OPC", opc_hex)
         else:
-            self._send_hex("00D5015710" + opc_hex, "00D5 write OPC")
+            self._send_hex("00D5015710" + opc_hex, "00D5 write OPc")
 
     def set_algorithm(self, alg_byte: int, lte: bool = True) -> None:
         """gen3 algorithm selector: 00D4 1B00 01 <byte> (LTE_ALG) or
