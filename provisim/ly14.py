@@ -97,16 +97,35 @@ class Ly14Card(UiccCard):
         return self.select_by_aid(self.PRIVATE_AID)
 
     def probe(self) -> Dict[str, bool]:
-        """Fire harmless read-only private probes, report which
-        command set this card answers. (6D00 = INS not supported.)"""
+        """Fire harmless read-only private probes, report which command set
+        this card answers. (6D00 = INS not supported.)
+
+        Probes both CLA=A0 (classic T=0 LY14 cards) and CLA=00 (T=1
+        variants — the T=1 cards reject CLA A0 with 6E00, which is NOT
+        'command missing'). Also notes whether VERIFY wants case-4
+        (data + Le) — the BHDMS/LY14 T=1 family does.
+        """
         result = {}
-        for name, hexcmd in {
+        for name, a0cmd in {
             "gen4_fb_read_ki": "A092000010",
             "gen4_state1": "A096000100",
             "gen4_state2": "A096000200",
         }.items():
-            result[name] = self._try_send(hexcmd, name)
-        result["df_7ff0"] = self._try_send("A0A40804043F007FF0", "select 7FF0")
+            c00 = "00" + a0cmd[2:]
+            result[name] = self._try_send(a0cmd, name + " claA0") or \
+                self._try_send(c00, name + " cla00")
+        result["df_7ff0"] = (self._try_send("A0A40804043F007FF0", "7FF0 A0") or
+                             self._try_send("00A40804043F007FF0", "7FF0 00"))
+        # case-4 VERIFY detection: Lc=08 data + Le=08 is the accepted form
+        # on the T=1 family; plain case-3 gets 6700/6C there.
+        result["verify_case4"] = False
+        try:
+            exchange(self.transport, 0x00, 0x20, 0x00, 0x0B,
+                     b"\x38" * 8, 0x08, context="case4 probe",
+                     log=self.transport.log)
+            result["verify_case4"] = True
+        except CardError:
+            pass
         return result
 
     # ---------------------------------------------------------- raw send
