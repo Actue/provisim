@@ -7,8 +7,11 @@ PC/SC (`pyscard`).
 - 📖 read full card profiles (ICCID, IMSI, ACC, PLMN lists, SPN, MSISDN, …) as JSON
 - ✍️  write card fields with a dry-run-first API (ADM required)
 - 🔓 reverse-engineered private protocols for **blank programmable cards**
-  (LY14 / Watchdata family, four protocol generations) — write **Ki / OPc /
-  algorithm / PINs** to writable cards, replay full initialisation templates
+  (LY14 / Watchdata / XLB families, five protocol generations) — write
+  **Ki / OPc / algorithm / PINs** to writable cards, replay full
+  initialisation templates
+- 🔀 **switch a card's AKA engine to standard Milenage** (one EF write) and
+  verify it end-to-end with `AUTHENTICATE` against host-side Milenage
 - 🔐 host-side **Milenage** (f1–f5\*, OPc) verified against 3GPP test vectors
 - 🖥️ CLI + library, zero dependencies beyond pyscard, works with any CCID reader
 
@@ -34,19 +37,32 @@ provisim pin verify --ref 0x08 --value <ADM>
 provisim write -i card.json --adm <ADM>   # dry run; add --yes to apply
 ```
 
-Blank programmable card (LY14 family):
+Blank programmable card — full provisioning with end-to-end verification
+(XLB family, live-verified workflow):
 
 ```python
 from provisim import PcscTransport
 from provisim.ly14 import Ly14Card
+from provisim.algorithms import compute_opc
+from provisim.codec import h2b
+import os
+
+KI = "00112233445566778899AABBCCDDEEFF"
+OP = "63BFA50EE6523365FF14C1F45F88737D"   # base-station side uses OP...
+OPC = compute_opc(h2b(KI), h2b(OP))        # ...cards store OPc
 
 with PcscTransport() as t:
     card = Ly14Card(t)
-    print(card.probe())          # read-only: which protocol generation?
-    card.verify_adm("3838383838383838")            # factory ADM '88888888'
-    card.set_ki("00112233445566778899aabbccddeeff")
-    card.set_opc("11111111111111111111111111111111")
-    print(card.read_ki().hex())  # some generations allow Ki readback
+    print(card.probe())                          # which generation?
+    card.verify_adm("3838383838383838")          # factory ADM '88888888'
+    card.set_ki(KI)                              # auto-dispatch per generation
+    card.set_opc(OPC.hex().upper())
+    card.set_milenage()                          # EF 2FE5 -> standard Milenage
+
+    # end-to-end proof: card must agree with host Milenage (SQN > 0x40!)
+    result = card.aka(os.urandom(16), sqn=(0x41).to_bytes(6, "big"),
+                      amf=b"\x80\x00", k=h2b(KI), opc=OPC)
+    print("AKA match:", result["match"])         # True = card ready for the network
 ```
 
 ## Library layout
@@ -67,14 +83,15 @@ with PcscTransport() as t:
 
 Static analysis of GRSIMWrite.exe (every card command is an ASCII-hex string
 in the Delphi CODE section) plus headless IDA decompilation of the write-card
-functions yielded four protocol generations:
+functions yielded five protocol generations:
 
-| generation | Ki / OPc write | unlock |
-|---|---|---|
-| 7FF0 (LY14) | SELECT `3F00/7FF0`, EF `0006`; `A0D6` offset 1 (Ki, 16B), offset 0x11 (OPc, 16B); also mirrored in EFs `000F`/`0012` | VERIFY ADM keyref `0x0B` |
-| gen4 `A0FB` | `A0FB <slot> <Lc> <magic><key>` — slots 00 PIN1/PUK1, 10 OPc, 21 PIN2, 29 PUK2, 3F ADM | `A0FB FF FF 08 <SADM>`, keyref `0x0A` |
-| gen3 `00D5` | `00D5 1C00 10 <Ki>`, `00D5 0157 10 <OPc>`, `00D4 1B00/01 01 <alg>` | `00E3 0000 08 <SADM>` |
-| record `A0D4` | `A0D4 3A01/3A02/3B00/3B02/3A05 08 <PIN1/PIN2/PUK1/PUK2/ADM>` | keyref `0x0B`/`04` |
+| generation | Ki / OPc write | algorithm switch | unlock |
+|---|---|---|---|
+| **XLB / BHDMS** (T=1, *live verified*) | private EFs under **MF**: `0001`←Ki (16B), `6002`←`01`\|\|OPc (17B) | **`2FE5` ← `081C2A0001` = standard Milenage** | ADM ref `0x0B`, **case-4 VERIFY** (data + Le) |
+| 7FF0 (LY14) | `3F00/7FF0/EF 0006`; Ki@01, OPc@0x11; mirrored in `000F`/`0012` | — | VERIFY ADM keyref `0x0B` |
+| gen4 `A0FB` | `A0FB <slot> <Lc> <magic><key>` — slots 00 PIN1/PUK1, 10 OPc, 21 PIN2, 29 PUK2, 3F ADM | — | `A0FB FF FF 08 <SADM>`, keyref `0x0A` |
+| gen3 `00D5` | `00D5 1C00 10 <Ki>`, `00D5 0157 10 <OPc>` | `00D4 1B00/01 01 <alg>` | `00E3 0000 08 <SADM>` |
+| record `A0D4` | `A0D4 3A01/3A02/3B00/3B02/3A05 08 <PIN1/PIN2/PUK1/PUK2/ADM>` | — | keyref `0x0B`/`04` |
 
 Bonus: `A0 92 00 00 10` reads the Ki back on some cards, `A0 96 00 01/02`
 read the algorithm state, `A0 52` sets the initial PIN, `A053` commits a
@@ -82,8 +99,22 @@ rebuilt file system. `replay_template()` re-runs the vendor's full
 initialisation (CREATE FILE storm + commit) — dry-run by default, **wipes
 the card** when applied.
 
-Open items (need a live blank card): the exact algorithm-selector byte per
-algorithm (candidates `0A`/`FF`) and the ATR→template mapping.
+### XLB family notes (live-verified 2026-10-28)
+
+* ADM: `00 20 00 0B 08 3838… 08` — the trailing **Le=08 is mandatory**
+  (case-3 gets 6700/6Cxx, which looks like "wrong length" but isn't).
+* Cards ship **without** the Milenage EF (`2FE5`); their AKA engine then
+  runs a proprietary algorithm and every `AUTHENTICATE` fails with
+  9862 regardless of keys. Writing `2FE5 = 08 1C 2A 00 01` fixes it.
+* `EF 2FE6` rec1 byte 0 = `0x40` is the **SQN floor**: the card answers
+  AUTS for any SQN ≤ 0x40 even when the keys are correct. Use SQN > 0x40.
+* End-to-end proof: `AUTHENTICATE` (`00 88 00 81`, UMTS format
+  `10||RAND||10||AUTN`) returns RES/CK/IK that match host-side Milenage
+  exactly — MAC-S comparison over AUTS included.
+
+Open items: ATR→template mapping for the 13 rebuild templates (T=0 LY14
+cards); XLB `EF 2FE5` parameter semantics beyond the known-good Milenage
+string.
 
 ## Tests
 
